@@ -11,6 +11,10 @@ from pydantic import BaseModel, Field
 
 from travel_assistant.agent import AgentService
 from travel_assistant.config import ROOT, Settings
+from travel_assistant.knowledge import KnowledgeBase
+from travel_assistant.planner import Planner
+from travel_assistant.routes import planning_router
+from travel_assistant.storage import Storage
 
 
 class ChatRequest(BaseModel):
@@ -32,12 +36,17 @@ def create_app(settings: Settings | None = None, service=None):
 
     @asynccontextmanager
     async def lifespan(app):
+        app.state.store = Storage(settings.database_file)
+        app.state.knowledge = KnowledgeBase(settings.database_file, settings)
+        app.state.planner = Planner(settings, app.state.knowledge)
         await service.start()
-        yield
-        await service.close()
-        sessions.clear()
+        try:
+            yield
+        finally:
+            await service.close()
+            sessions.clear()
 
-    app = FastAPI(title="Travel Assistant", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Travel Assistant", version="1.0.0", lifespan=lifespan)
 
     def authenticate(authorization: str | None = Header(default=None)):
         token = settings.app_api_token.get_secret_value()
@@ -45,6 +54,7 @@ def create_app(settings: Settings | None = None, service=None):
             raise HTTPException(401, "访问令牌不正确。")
 
     dependencies = [Depends(authenticate)]
+    app.include_router(planning_router(dependencies, settings))
 
     @app.get("/health", dependencies=dependencies)
     async def health():
@@ -92,13 +102,17 @@ def create_app(settings: Settings | None = None, service=None):
             session.turns += 1
             try:
                 async with asyncio.timeout(settings.request_timeout):
-                    result = await service.chat(request.message, key, request.allow_save)
+                    result = await service.chat(
+                        request.message, key, request.allow_save
+                    )
             except Exception as error:
                 # Failed/cancelled graphs can contain unfinished tool calls; retire the session.
                 await service.forget(key)
                 sessions.pop(key, None)
                 code = 504 if isinstance(error, TimeoutError) else 502
-                raise HTTPException(code, "服务请求失败，会话已重置，请新建会话后重试。") from None
+                raise HTTPException(
+                    code, "服务请求失败，会话已重置，请新建会话后重试。"
+                ) from None
         return {"thread_id": key, "mode": settings.app_mode, **result}
 
     @app.get("/", include_in_schema=False)
