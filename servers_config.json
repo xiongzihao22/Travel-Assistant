@@ -1,0 +1,6 @@
+{
+  "weather": {"script": "weather_server.py"},
+  "notes": {"script": "write_server.py"},
+  "demo_maps": {"script": "demo_maps_server.py", "mode": "demo"},
+  "amap": {"remote": true, "mode": "live"}
+}
