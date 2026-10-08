@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     amap_transport: Literal["streamable_http", "sse"] = "streamable_http"
     amap_mcp_url: str = "https://mcp.amap.com/mcp"
     output_dir: Path = Path("output")
+    database_path: Path = Path("data/travel.db")
     request_timeout: float = Field(90, ge=1, le=300)
     max_sessions: int = Field(100, ge=1, le=1000)
     max_turns: int = Field(30, ge=1, le=100)
@@ -28,3 +29,7 @@ class Settings(BaseSettings):
     @property
     def output_path(self) -> Path:
         return (ROOT / self.output_dir).resolve()
+
+    @property
+    def database_file(self) -> Path:
+        return (ROOT / self.database_path).resolve()
