@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Travel Assistant · 智能出行助手</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <aside>
+    <a class="brand" href="/">↗ <span>Travel Assistant<small>智能出行助手</small></span></a>
+    <button id="new-chat" class="new-chat">＋ 开始新会话</button>
+    <div class="label">旅途，从一个想法开始</div>
+    <p class="aside-copy">把天气、目的地和路线<br>放进同一次对话。</p>
+    <div class="capabilities"><span>☀ 天气查询</span><span>⌖ 地点与路线</span><span>▤ 行程笔记</span></div>
+    <div class="aside-bottom"><span class="dot"></span><span id="connection">正在连接…</span></div>
+  </aside>
+  <main>
+    <header><span>你的出行工作台</span><span id="mode" class="badge">连接中</span></header>
+    <div id="notice" role="status"></div>
+    <section id="welcome">
+      <div class="eyebrow">LESS PLANNING, MORE EXPLORING</div>
+      <h1>下一站，<em>想去哪里？</em></h1>
+      <p>从一场短途漫步，到一个周末的城市探索。</p>
+      <div class="suggestions">
+        <button data-prompt="查询北京当前天气"><b>看看天气 ↗</b><span>出发前，了解目的地天气</span></button>
+        <button data-prompt="帮我规划北京一日行程"><b>安排一天 ↗</b><span>让目的地变成一份行程</span></button>
+        <button data-prompt="我想规划路线，需要提供什么信息？"><b>找到路线 ↗</b><span>告诉我起点、终点和出行方式</span></button>
+      </div>
+    </section>
+    <section id="messages" aria-live="polite" aria-label="聊天记录"></section>
+    <div class="composer-wrap">
+      <form id="chat-form">
+        <label for="message" class="sr-only">你的出行需求</label>
+        <textarea id="message" rows="2" maxlength="4000" placeholder="告诉我你的目的地和出行想法…" required></textarea>
+        <div class="composer-footer"><label><input type="checkbox" id="allow-save">允许本次保存文件</label><button id="send" type="submit">发送 ↗</button></div>
+      </form>
+      <div class="footnote">演示数据会明确标注；实时信息以服务返回及实际情况为准。Enter 发送 · Shift+Enter 换行</div>
+    </div>
+  </main>
+  <dialog id="auth-dialog"><form id="auth-form"><h2>连接你的助手</h2><p>此服务已启用访问令牌。</p><label for="token">访问令牌</label><input id="token" type="password" required autocomplete="off"><button>连接</button></form></dialog>
+</body>
+</html>
