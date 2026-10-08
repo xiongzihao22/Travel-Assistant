@@ -15,7 +15,7 @@ async def query_weather(city: str) -> dict:
             "description": "多云（固定演示数据）",
             "temperature_c": 23,
             "humidity_percent": 60,
-            "source": "本地演示数据，非实时天气，不可用于实际出行判断",
+            "source": "本地固定演示数据",
         }
     key = os.getenv("OPENWEATHER_API_KEY", "")
     if not key:
