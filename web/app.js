@@ -4,7 +4,8 @@ const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 const money = (value) => Number(value || 0).toLocaleString("zh-CN", {maximumFractionDigits: 0});
 const state = {trip: null, trips: [], day: 1, view: "new", thread: null, chatBusy: false, mutation: false};
-const fields = {destination: "destination", start_date: "start-date", days: "days", travelers: "travelers", budget: "budget", pace: "pace", transport: "transport", companion: "companion"};
+const fields = {destination: "destination", start_date: "start-date", days: "days", travelers: "travelers", budget: "budget", pace: "pace", transport: "transport", companion: "companion", meal_budget_per_person: "meal-budget"};
+const mealNames = {lunch: "午餐", dinner: "晚餐"};
 const touchedFields = new Set();
 let carriedPreferences = {};
 let apiToken = "";
@@ -141,6 +142,21 @@ function hydratePreferences(preferences) {
   if (Array.isArray(preferences.interests)) {
     $$("input[name=interest]").forEach((input) => { input.checked = preferences.interests.includes(input.value); });
   }
+  if (Array.isArray(preferences.cuisine_preferences)) $("#cuisine-preferences").value = preferences.cuisine_preferences.join("、");
+  if (Array.isArray(preferences.dietary_preferences)) {
+    const available = $$("input[name=dietary]").map((input) => input.value);
+    preferences.dietary_preferences.filter((value) => !available.includes(value)).forEach((value) => {
+      const option = el("label");
+      const input = el("input");
+      input.type = "checkbox";
+      input.name = "dietary";
+      input.value = value;
+      input.addEventListener("change", () => touchedFields.add("dietary_preferences"));
+      option.append(input, el("span", "", value));
+      $(".dining-dietary .interest-options").append(option);
+    });
+    $$("input[name=dietary]").forEach((input) => { input.checked = preferences.dietary_preferences.includes(input.value); });
+  }
 }
 
 function collectPreferences(message) {
@@ -148,10 +164,12 @@ function collectPreferences(message) {
   for (const [key, id] of Object.entries(fields)) {
     const value = $(`#${id}`).value.trim();
     if (touchedFields.has(key) || (value && (!message || ["destination", "start_date"].includes(key)))) {
-      preferences[key] = value && ["days", "travelers", "budget"].includes(key) ? Number(value) : value;
+      preferences[key] = value && ["days", "travelers", "budget", "meal_budget_per_person"].includes(key) ? Number(value) : value;
     }
   }
   if (!message || touchedFields.has("interests")) preferences.interests = $$("input[name=interest]:checked").map((input) => input.value);
+  if (!message || touchedFields.has("cuisine_preferences")) preferences.cuisine_preferences = [...new Set($("#cuisine-preferences").value.split(/[，,、；;]+/).map((value) => value.trim()).filter(Boolean))].slice(0, 8);
+  if (!message || touchedFields.has("dietary_preferences")) preferences.dietary_preferences = $$("input[name=dietary]:checked").map((input) => input.value);
   return preferences;
 }
 
@@ -215,7 +233,15 @@ function renderDay() {
   $("#day-title").textContent = day.title;
   $("#day-cost").textContent = `当日约 ¥${money(day.estimated_cost)}`;
   $("#timeline").replaceChildren();
-  day.activities.forEach((activity, index) => {
+  const entries = [
+    ...day.activities.map((activity, index) => ({kind: "activity", item: activity, index})),
+    ...(day.meals || []).map((meal) => ({kind: "meal", item: meal})),
+  ].sort((a, b) => a.item.start_time.localeCompare(b.item.start_time));
+  entries.forEach(({kind, item: activity, index}) => {
+    if (kind === "meal") {
+      $("#timeline").append(renderMeal(activity, day.day));
+      return;
+    }
     const item = el("article", "activity");
     const body = el("div", "activity-body");
     body.append(el("div", "activity-time", `${activity.start_time} — ${activity.end_time}`));
@@ -239,7 +265,86 @@ function renderDay() {
   $("#day-notes").hidden = !day.notes.length;
   $("#route-distance").textContent = `${Number(day.route.distance_km || 0).toFixed(1)} km · ${day.route.duration_minutes || 0} 分钟`;
   $("#route-source").textContent = day.route.source;
+  $("#meal-map-legend").hidden = !day.meals?.length;
   renderMap(day);
+}
+
+function restaurantInfo(restaurant, compact = false) {
+  const content = el("div", "restaurant-info");
+  if (restaurant.recommendation_reason) content.append(el("p", "restaurant-reason", restaurant.recommendation_reason));
+  const tags = el("div", "activity-tags restaurant-tags");
+  [...(restaurant.cuisines || []), ...(restaurant.dietary_tags || [])].forEach((tag) => tags.append(el("span", "", tag)));
+  if (restaurant.rating !== null && restaurant.rating !== undefined) tags.append(el("span", "restaurant-rating", `★ ${Number(restaurant.rating).toFixed(1)}`));
+  if (Number.isFinite(restaurant.detour_minutes)) tags.append(el("span", "", `绕行约 ${restaurant.detour_minutes} 分钟`));
+  if (tags.childElementCount) content.append(tags);
+  if (restaurant.address) content.append(el("p", "restaurant-address", `⌖ ${restaurant.address}`));
+  if (restaurant.opening_hours) content.append(el("p", "restaurant-hours", `营业时间 · ${restaurant.opening_hours}`));
+  const source = el("div", "activity-source restaurant-source");
+  if (restaurant.price_source) source.append(el("span", "", `${restaurant.price_source} · `));
+  source.append(safeLink(restaurant.source_url, restaurant.source || "餐饮地点资料"));
+  content.append(source);
+  content.classList.toggle("compact", compact);
+  return content;
+}
+
+function focusRestaurant(restaurant) {
+  if (!map) return;
+  map.setView([restaurant.lat, restaurant.lon], 15);
+  $("#map").scrollIntoView({behavior: "smooth", block: "center"});
+}
+
+function renderMeal(meal, dayNumber) {
+  const restaurant = meal.restaurant;
+  const label = mealNames[meal.slot] || "用餐";
+  const item = el("article", "activity meal-activity");
+  const marker = el("button", "activity-marker meal-marker", "🍴");
+  marker.type = "button";
+  marker.setAttribute("aria-label", `在地图上查看第${dayNumber}天${label}：${restaurant.name}`);
+  marker.addEventListener("click", () => focusRestaurant(restaurant));
+  const body = el("div", "activity-body meal-body");
+  const time = el("div", "activity-time meal-time", `${meal.start_time} — ${meal.end_time}`);
+  time.append(el("span", "meal-slot", label));
+  const head = el("div", "activity-head");
+  head.append(el("h3", "", restaurant.name), el("span", "activity-cost", `¥${money(restaurant.cost_per_person)} / 人`));
+  body.append(time, head, restaurantInfo(restaurant));
+  if (meal.notes?.length) {
+    const notes = el("div", "meal-notes");
+    meal.notes.forEach((note) => notes.append(el("p", "", note)));
+    body.append(notes);
+  }
+  if (meal.alternatives?.length) {
+    const alternatives = el("details", "meal-alternatives");
+    alternatives.append(el("summary", "", `想换个口味？查看 ${meal.alternatives.length} 个备选`));
+    meal.alternatives.forEach((alternative) => {
+      const card = el("div", "restaurant-alternative");
+      const heading = el("div", "activity-head");
+      heading.append(el("strong", "", alternative.name), el("span", "activity-cost", `¥${money(alternative.cost_per_person)} / 人`));
+      const choose = el("button", "secondary choose-restaurant", "换成这家 ↗");
+      choose.type = "button";
+      choose.setAttribute("aria-label", `第${dayNumber}天${label}换成${alternative.name}`);
+      choose.addEventListener("click", () => selectMeal(dayNumber, meal.slot, alternative.id));
+      card.append(heading, restaurantInfo(alternative, true), choose);
+      alternatives.append(card);
+    });
+    body.append(alternatives);
+  }
+  item.append(marker, body);
+  return item;
+}
+
+async function selectMeal(day, slot, restaurantId) {
+  if (state.mutation || !state.trip) return;
+  const id = state.trip.id;
+  notify();
+  working(true, "正在安排这一餐", "更新餐厅、交通时间与费用，保存为新的行程版本…");
+  try {
+    const trip = await request(`/trips/${encodeURIComponent(id)}/meals/select`, {method: "POST", body: JSON.stringify({day, slot, restaurant_id: restaurantId, base_version: state.trip.version})});
+    state.day = day;
+    displayTrip(trip, false);
+    $("#revision-status").textContent = `第 ${day} 天${mealNames[slot]}已更新，当前版本为 v${trip.version}。`;
+    await refreshTrips();
+  } catch (error) { await conflictRefresh(error, id); }
+  finally { working(false); }
 }
 
 function renderMap(day) {
@@ -264,6 +369,17 @@ function renderMap(day) {
     popup.append(el("strong", "", activity.name), el("div", "", `${activity.start_time} — ${activity.end_time}`), el("div", "", activity.description));
     const icon = L.divIcon({className: "map-marker", html: String(index + 1), iconSize: [28, 28], iconAnchor: [14, 14]});
     L.marker(point, {icon, title: activity.name}).bindPopup(popup).addTo(mapLayers);
+  });
+  (day.meals || []).forEach((meal) => {
+    const restaurant = meal.restaurant;
+    const point = [restaurant.lat, restaurant.lon];
+    points.push(point);
+    const label = mealNames[meal.slot];
+    const popup = el("div");
+    popup.append(el("strong", "", `${label} · ${restaurant.name}`), el("div", "", `${meal.start_time} — ${meal.end_time} · ¥${money(restaurant.cost_per_person)} / 人`));
+    if (restaurant.address) popup.append(el("div", "", restaurant.address));
+    const icon = L.divIcon({className: "map-marker restaurant-marker", html: "🍴", iconSize: [30, 30], iconAnchor: [15, 15]});
+    L.marker(point, {icon, title: `${label} · ${restaurant.name}`}).bindPopup(popup).addTo(mapLayers);
   });
   const lodging = state.trip.plan.lodging;
   if (lodging) {
@@ -316,6 +432,26 @@ function renderBudget(budget) {
   budget.warnings.forEach((warning) => $("#budget-advice").append(el("p", "warning", warning)));
   budget.alternatives.forEach((alternative) => $("#budget-advice").append(el("p", "", alternative)));
   if (!budget.warnings.length && !budget.alternatives.length) $("#budget-advice").append(el("p", "", "当前计划在预算之内。可以在调整行程中提出新的预算目标。"));
+  renderMealBudget(state.trip.plan);
+}
+
+function renderMealBudget(plan) {
+  const days = plan.days.filter((day) => day.meals?.length);
+  $("#meal-budget-details").hidden = !days.length;
+  $("#meal-budget-items").replaceChildren();
+  days.forEach((day) => {
+    const card = el("section", "meal-budget-day");
+    card.append(el("h3", "", `第 ${day.day} 天 · ${dateLabel(day.date)}`));
+    const breakfast = el("div", "meal-cost-row");
+    breakfast.append(el("span", "", "早餐预留"), el("small", "", `¥${money(day.breakfast_cost_per_person)} × ${plan.preferences.travelers} 人`), el("b", "", `¥${money(day.breakfast_cost_per_person * plan.preferences.travelers)}`));
+    card.append(breakfast);
+    day.meals.forEach((meal) => {
+      const row = el("div", "meal-cost-row");
+      row.append(el("span", "", `${mealNames[meal.slot]} · ${meal.restaurant.name}`), el("small", "", `¥${money(meal.restaurant.cost_per_person)} × ${plan.preferences.travelers} 人`), el("b", "", `¥${money(meal.restaurant.cost_per_person * plan.preferences.travelers)}`));
+      card.append(row);
+    });
+    $("#meal-budget-items").append(card);
+  });
 }
 
 function renderSources(container, sources = []) {
@@ -438,6 +574,8 @@ $("#companion").addEventListener("change", () => {
   }
 });
 $$("input[name=interest]").forEach((input) => input.addEventListener("change", () => touchedFields.add("interests")));
+$("#cuisine-preferences").addEventListener("input", () => touchedFields.add("cuisine_preferences"));
+$$("input[name=dietary]").forEach((input) => input.addEventListener("change", () => touchedFields.add("dietary_preferences")));
 $("#plan-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (state.mutation) return;
