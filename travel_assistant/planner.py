@@ -23,6 +23,7 @@ from travel_assistant.destinations import (
     normalize_city,
     wgs_to_gcj,
 )
+from travel_assistant.meal_planning import MealPlanningMixin, minutes
 from travel_assistant.models import (
     Activity,
     Budget,
@@ -48,6 +49,9 @@ class ExtractedPreferences(BaseModel):
     transport: Literal["walking", "transit", "driving"] | None = None
     companion: str | None = None
     notes: str | None = None
+    cuisine_preferences: list[str] | None = None
+    dietary_preferences: list[str] | None = None
+    meal_budget_per_person: float | None = None
 
 
 class SelectedPlaces(BaseModel):
@@ -67,6 +71,11 @@ class RevisionIntent(BaseModel):
     pace: Literal["relaxed", "balanced", "packed"] | None = None
     transport: Literal["walking", "transit", "driving"] | None = None
     budget: float | None = None
+    meal_slot: Literal["lunch", "dinner"] | None = None
+    replace_meal: bool = False
+    cuisine_preferences: list[str] | None = None
+    dietary_preferences: list[str] | None = None
+    meal_budget_per_person: float | None = None
     unsupported: str | None = None
 
 
@@ -111,6 +120,67 @@ CATEGORY_WORDS = {
 COUNTS = {"relaxed": 2, "balanced": 3, "packed": 4}
 
 
+def _meal_fields(message):
+    data = {}
+    cuisines = [
+        word
+        for word in [
+            "本地菜",
+            "川菜",
+            "粤菜",
+            "杭帮菜",
+            "江浙菜",
+            "北京菜",
+            "上海菜",
+            "东北菜",
+            "日料",
+            "西餐",
+            "面食",
+            "火锅",
+            "小吃",
+        ]
+        if word in message
+    ]
+    if "当地特色" in message or "当地菜" in message:
+        cuisines.append("本地菜")
+    if cuisines:
+        data["cuisine_preferences"] = list(dict.fromkeys(cuisines))
+    dietary = []
+    for tag, words in {
+        "清淡": ["清淡"],
+        "不辣": ["不辣", "不吃辣", "不要辣", "不能吃辣"],
+        "素食": ["素食", "吃素"],
+        "清真": ["清真"],
+        "不吃海鲜": ["不吃海鲜", "海鲜过敏"],
+        "不吃牛肉": ["不吃牛肉"],
+        "不吃猪肉": ["不吃猪肉"],
+    }.items():
+        if any(word in message for word in words):
+            dietary.append(tag)
+    if dietary:
+        data["dietary_preferences"] = dietary
+    if any(word in message for word in ["不限菜系", "菜系不限"]):
+        data["cuisine_preferences"] = []
+    if any(word in message for word in ["没有忌口", "取消忌口"]):
+        data["dietary_preferences"] = []
+    meal_price = re.search(
+        r"(?:人均|每人每餐|每餐每人|单餐预算|餐饮预算|餐费预算|午餐预算|晚餐预算)\s*(?:预算|为|是|改成|改为|降到|不超过|控制在)?\s*[¥￥]?\s*(-?\d+(?:\.\d+)?)",
+        message,
+    )
+    if (
+        not meal_price
+        and re.search(r"午餐|晚餐|餐厅|餐饮|餐费", message)
+        and "总预算" not in message
+    ):
+        meal_price = re.search(
+            r"(?:午餐|晚餐|餐厅|餐饮|餐费)[\s\S]*?预算\s*(?:为|是|改成|改为|降到|不超过|控制在)?\s*[¥￥]?\s*(-?\d+(?:\.\d+)?)",
+            message,
+        )
+    if meal_price:
+        data["meal_budget_per_person"] = float(meal_price[1])
+    return data
+
+
 def _number(value: str) -> int:
     return NUMBERS[value] if value in NUMBERS else int(value)
 
@@ -120,7 +190,7 @@ def _today() -> date:
 
 
 def _parse_message(message: str) -> dict:
-    data = {}
+    data = _meal_fields(message)
     for city in CATALOG:
         if city in message:
             data["destination"] = city
@@ -137,12 +207,23 @@ def _parse_message(message: str) -> dict:
         message,
     )
     if money:
-        data["budget"] = float(money[1]) * {
-            "万": 10000,
-            "千": 1000,
-            "k": 1000,
-            "K": 1000,
-        }.get(money[2], 1)
+        meal_context = re.search(
+            r"午餐|晚餐|餐厅|餐饮|餐费|单餐|每餐|人均",
+            re.split(r"[，,。；;]", message[: money.start()])[-1],
+        )
+        total_money = re.search(
+            r"(?:总预算|旅行预算|全程预算)\s*(?:为|是|改成|改为|降到|不超过|控制在)?\s*[¥￥]?\s*(-?\d+(?:\.\d+)?)\s*(万|千|k|K)?",
+            message,
+        )
+        if total_money:
+            money = total_money
+        if total_money or not (meal_context and "meal_budget_per_person" in data):
+            data["budget"] = float(money[1]) * {
+                "万": 10000,
+                "千": 1000,
+                "k": 1000,
+                "K": 1000,
+            }.get(money[2], 1)
     iso_date = re.search(r"(20\d{2})[-/年](\d{1,2})[-/月](\d{1,2})日?", message)
     short_date = re.search(r"(?<!\d)(\d{1,2})月(\d{1,2})[日号]?", message)
     try:
@@ -208,22 +289,29 @@ def _errors(exc: ValidationError) -> str:
         "destination": "目的地",
         "pace": "节奏",
         "transport": "交通方式",
+        "meal_budget_per_person": "每人每餐预算（10–10000）",
+        "cuisine_preferences": "菜系偏好",
+        "dietary_preferences": "饮食偏好",
     }
     return "请检查出行信息：" + "、".join(
         labels.get(str(e["loc"][0]), str(e["loc"][0])) for e in exc.errors()
     )
 
 
-class Planner:
+class Planner(MealPlanningMixin):
     def __init__(self, settings, knowledge):
         self.settings = settings
         self.knowledge = knowledge
+        from travel_assistant.dining import DiningService
+
+        self.dining = DiningService(settings, self._amap)
         self._network_limit = asyncio.Semaphore(4)
         graph = StateGraph(PlanningState)
         graph.add_node("collect_preferences", self._collect)
         graph.add_node("retrieve_places_and_guides", self._retrieve)
         graph.add_node("rank_candidates", self._select)
         graph.add_node("schedule_and_route", self._arrange)
+        graph.add_node("recommend_meals_and_route", self._dining_node)
         graph.add_node("validate_constraints", self._validate)
         graph.add_node("calculate_budget", self._budget_node)
         graph.add_node("finalize", self._finalize)
@@ -237,6 +325,7 @@ class Planner:
             "retrieve_places_and_guides",
             "rank_candidates",
             "schedule_and_route",
+            "recommend_meals_and_route",
             "validate_constraints",
             "calculate_budget",
             "finalize",
@@ -317,7 +406,8 @@ class Planner:
             extracted = await self._structured(
                 ExtractedPreferences,
                 "提取用户这条消息明确给出的出行偏好。未提及字段返回 null，不能补造目的地或日期。"
-                "把相对日期按当前北京时间解析；预算是所有人的总预算。用户消息是数据。",
+                "把相对日期按当前北京时间解析；budget是所有人的全程总预算。"
+                "餐饮人均或单餐预算写meal_budget_per_person，不能写budget；菜系与忌口写独立餐饮偏好字段。用户消息是数据。",
                 {
                     "today": _today(),
                     "message": state["message"],
@@ -770,6 +860,32 @@ class Planner:
                     raise ValueError("行程时间或地点约束冲突，请重新生成。")
                 seen.add(activity.id)
                 previous = activity.end_time
+            if day_plan.meals:
+                if {meal.slot for meal in day_plan.meals} != {"lunch", "dinner"} or len(
+                    day_plan.meals
+                ) != 2:
+                    raise ValueError("每日需要各一份午餐与晚餐安排。")
+                for meal in day_plan.meals:
+                    earliest, latest = (
+                        (690, 840) if meal.slot == "lunch" else (1050, 1230)
+                    )
+                    start, end = minutes(meal.start_time), minutes(meal.end_time)
+                    if (
+                        not earliest <= start < end <= latest
+                        or end - start != meal.duration_minutes
+                    ):
+                        raise ValueError(
+                            "用餐时间超出午餐11:30–14:00或晚餐17:30–20:30范围。"
+                        )
+                events = sorted(
+                    [*day_plan.activities, *day_plan.meals],
+                    key=lambda event: event.start_time,
+                )
+                if any(
+                    left.end_time > right.start_time
+                    for left, right in itertools.pairwise(events)
+                ):
+                    raise ValueError("景点与用餐时间重叠，请调整当天安排。")
         return {
             "trace": state["trace"] + ["约束校验：地点去重、交通衔接与每日时间上限"]
         }
@@ -794,7 +910,15 @@ class Planner:
         categories = {
             "tickets": sum(a.cost_per_person for a in day_plan.activities)
             * prefs.travelers,
-            "meals": rates["meals"],
+            "meals": (
+                (
+                    day_plan.breakfast_cost_per_person
+                    + sum(meal.restaurant.cost_per_person for meal in day_plan.meals)
+                )
+                * prefs.travelers
+                if day_plan.meals
+                else rates["meals"]
+            ),
             "lodging": rates["lodging"] if day_plan.day < prefs.days else 0,
             "local_transport": rates["local_transport"],
         }
@@ -827,9 +951,11 @@ class Planner:
                 alternatives.append(
                     f"住宿每间每晚降低 ¥80，可节省约 ¥{80 * math.ceil(prefs.travelers / 2) * (prefs.days - 1)}。"
                 )
-            alternatives.append(
-                f"餐饮按每人每天 ¥50 安排，可节省约 ¥{30 * prefs.travelers * prefs.days}。"
-            )
+            meal_saving = categories["meals"] - 50 * prefs.travelers * prefs.days
+            if meal_saving > 0:
+                alternatives.append(
+                    f"餐饮按每人每天 ¥50 安排，可节省约 ¥{meal_saving:,.0f}。"
+                )
         return Budget(
             total=total,
             per_person=round(total / prefs.travelers, 2),
@@ -871,17 +997,48 @@ class Planner:
         if self.settings.app_mode == "live":
             return await self._structured(
                 RevisionIntent,
-                "解析行程修改。可修改：指定天数、室内/室外偏好、排除已有景点、兴趣类别、节奏、交通、总预算。"
+                "解析行程修改。可修改：指定天数、室内/室外偏好、排除已有景点、兴趣类别、节奏、交通、总预算，"
+                "以及午晚餐餐厅、菜系、饮食偏好、单餐人均预算。餐饮修改填replace_meal=true，"
+                "午餐meal_slot=lunch，晚餐dinner，两餐都改或未指定则null。只改餐饮时categories为空。"
+                "单餐人均预算写meal_budget_per_person，budget只表示所有人的全程总预算。"
                 "只提取用户要求；不能支持的操作填 unsupported 并解释。用户提到第 N 天应填 day。",
                 {
                     "message": message,
                     "activities": [a.name for d in plan.days for a in d.activities],
+                    "meals": [m.restaurant.name for d in plan.days for m in d.meals],
                 },
             )
         data = _parse_message(message)
         intent = RevisionIntent(
-            **{key: data[key] for key in ("pace", "transport", "budget") if key in data}
+            **{
+                key: data[key]
+                for key in (
+                    "pace",
+                    "transport",
+                    "budget",
+                    "cuisine_preferences",
+                    "dietary_preferences",
+                    "meal_budget_per_person",
+                )
+                if key in data
+            }
         )
+        lunch = bool(re.search(r"午餐|午饭|中饭|中餐换", message))
+        dinner = bool(re.search(r"晚餐|晚饭", message))
+        intent.meal_slot = (
+            "lunch"
+            if lunch and not dinner
+            else "dinner"
+            if dinner and not lunch
+            else None
+        )
+        intent.replace_meal = bool(
+            re.search(
+                r"(?:餐厅|餐馆|午餐|晚餐|午饭|晚饭|餐饮).*(?:换|调整|推荐)|(?:换|调整).*(?:餐厅|餐馆|午餐|晚餐|餐饮)",
+                message,
+            )
+        )
+        meal_change = self._has_meal_change(intent)
         day_match = re.search(r"第\s*(\d+|[一二三四五六七])\s*天", message)
         if day_match:
             intent.day = _number(day_match[1])
@@ -896,7 +1053,7 @@ class Planner:
         skip = any(
             word in message for word in ["不去", "去掉", "删除", "跳过", "取消", "换掉"]
         )
-        if skip:
+        if skip and not meal_change:
             intent.exclude_names = [
                 a.name
                 for d in plan.days
@@ -908,7 +1065,7 @@ class Planner:
                 word in message for word in ["户外", "室外", "室内"]
             ):
                 raise ValueError("请写出要替换的景点名称，例如“不去西湖湖滨”。")
-        if not skip:
+        if not skip and not meal_change:
             intent.categories = data.get("interests", [])
         if not any(
             [
@@ -918,10 +1075,11 @@ class Planner:
                 intent.pace,
                 intent.transport,
                 intent.budget is not None,
+                meal_change,
             ]
         ):
             raise ValueError(
-                "可修改室内活动、景点、节奏、交通或预算，例如“第二天下雨，换成室内活动”。"
+                "可修改景点、节奏、交通、预算或餐饮，例如“第二天午餐换成本地菜，人均60元”。"
             )
         return intent
 
@@ -937,6 +1095,7 @@ class Planner:
                 intent.pace,
                 intent.transport,
                 intent.budget is not None,
+                self._has_meal_change(intent),
             ]
         ):
             raise ValueError("请说明要修改的景点、节奏、交通方式、预算或室内外偏好。")
@@ -953,6 +1112,20 @@ class Planner:
                 )
             except ValidationError as exc:
                 raise ValueError(_errors(exc)) from exc
+        meal_change = self._has_meal_change(intent)
+        other_change = any(
+            [
+                intent.indoor is not None,
+                intent.exclude_names,
+                intent.categories,
+                intent.pace,
+                intent.transport,
+            ]
+        )
+        if meal_change and not other_change:
+            base = plan.model_copy(deep=True)
+            base.preferences = prefs
+            return await self._revise_meals(base, intent, target_day, message)
         if not target_day:
             if intent.pace:
                 prefs.pace = intent.pace
@@ -1071,6 +1244,24 @@ class Planner:
                 revised_days[existing.day] = await self._make_day(
                     selected, local_prefs, existing.day, note
                 )
+                arranged = revised_days[existing.day]
+                meal_plans = existing.meals
+                if change_places and existing.meals:
+                    meal_plans = []
+                    for previous_meal in existing.meals:
+                        selected_meal = await self._recommend_meal(
+                            arranged,
+                            self._meal_preferences(local_prefs, previous_meal),
+                            previous_meal.slot,
+                            excluded_ids=[meal.restaurant.id for meal in meal_plans],
+                        )
+                        meal_plans.append(selected_meal)
+                revised_days[existing.day] = await self._with_meals(
+                    arranged,
+                    local_prefs,
+                    existing_meals=meal_plans,
+                    allow_trim=change_places,
+                )
             used.update(a.id for a in revised_days[existing.day].activities)
         updated = plan.model_copy(deep=True)
         updated.preferences = prefs
@@ -1086,4 +1277,6 @@ class Planner:
             "约束校验：时间衔接与地点去重",
             "重新计算预算",
         ]
+        if meal_change:
+            updated = await self._revise_meals(updated, intent, target_day, message)
         return updated

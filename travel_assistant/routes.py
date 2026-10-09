@@ -16,6 +16,7 @@ from travel_assistant.exports import export_ics, export_markdown, export_pdf
 from travel_assistant.models import (
     DocumentRequest,
     GenerateRequest,
+    MealSelectionRequest,
     Plan,
     QuestionRequest,
     RestoreRequest,
@@ -114,6 +115,35 @@ def planning_router(dependencies, settings):
                 request.app.state.store.versions, str(trip_id)
             )
         }
+
+    @router.post("/trips/{trip_id}/meals/select")
+    async def select_meal(trip_id: UUID, body: MealSelectionRequest, request: Request):
+        async def execute():
+            trip = await lookup(request, trip_id)
+            check_version(trip, body.base_version)
+            plan = await request.app.state.planner.select_meal(
+                Plan.model_validate(trip["plan"]),
+                body.day,
+                body.slot,
+                body.restaurant_id,
+            )
+            slot_label = "午餐" if body.slot == "lunch" else "晚餐"
+            meal = next(
+                meal
+                for day in plan.days
+                if day.day == body.day
+                for meal in day.meals
+                if meal.slot == body.slot
+            )
+            return await persist(
+                request.app.state.store.revise,
+                str(trip_id),
+                plan.model_dump(mode="json"),
+                body.base_version,
+                f"第 {body.day} 天{slot_label}更换为{meal.restaurant.name}",
+            )
+
+        return await work(execute)
 
     @router.post("/trips/{trip_id}/restore")
     async def restore(trip_id: UUID, body: RestoreRequest, request: Request):

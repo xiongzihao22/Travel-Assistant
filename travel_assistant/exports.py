@@ -23,6 +23,58 @@ def _money(value):
     return f"¥{float(value):,.0f}"
 
 
+def _daily_events(day, include_alternatives=False):
+    events = list(day["activities"])
+    for meal in day.get("meals", []):
+        restaurant = meal["restaurant"]
+        label = "午餐" if meal["slot"] == "lunch" else "晚餐"
+        details = [restaurant.get("recommendation_reason", "")]
+        if restaurant.get("address"):
+            details.append("地址：" + restaurant["address"])
+        if restaurant.get("cuisines"):
+            details.append("菜系：" + "、".join(restaurant["cuisines"]))
+        if restaurant.get("rating") is not None:
+            details.append(f"评分：{restaurant['rating']}")
+        if restaurant.get("opening_hours"):
+            details.append("营业时间：" + restaurant["opening_hours"])
+        details.append(
+            f"人均 {_money(restaurant['cost_per_person'])}（{restaurant.get('price_source', '餐费估算')}）"
+        )
+        details.extend(meal.get("notes", []))
+        if include_alternatives and meal.get("alternatives"):
+            details.append(
+                "备选："
+                + "；".join(
+                    f"{option['name']} / 人均 {_money(option['cost_per_person'])}"
+                    for option in meal["alternatives"]
+                )
+            )
+        events.append(
+            {
+                "id": "meal:" + meal["slot"],
+                "kind": "meal",
+                "name": f"{label} · {restaurant['name']}",
+                "start_time": meal["start_time"],
+                "end_time": meal["end_time"],
+                "duration_minutes": meal.get("duration_minutes", 60),
+                "cost_per_person": restaurant["cost_per_person"],
+                "lat": restaurant["lat"],
+                "lon": restaurant["lon"],
+                "description": "\n".join(filter(None, details)),
+                "source": restaurant.get("source", "餐饮地点资料"),
+                "source_url": restaurant.get("source_url", ""),
+                "location": restaurant["name"] + " " + restaurant.get("address", ""),
+            }
+        )
+    return sorted(events, key=lambda event: event["start_time"])
+
+
+def _event_type(activity):
+    if activity.get("kind") == "meal":
+        return "餐饮安排"
+    return "室内" if activity["indoor"] else "室外"
+
+
 def export_markdown(plan):
     plan = _plan(plan)
     preferences, budget = plan["preferences"], plan["budget"]
@@ -56,14 +108,14 @@ def export_markdown(plan):
         lines.append("")
     for day in plan["days"]:
         lines.extend([f"## 第 {day['day']} 天 · {day['date']} · {day['title']}", ""])
-        for activity in day["activities"]:
+        for activity in _daily_events(day, include_alternatives=True):
             lines.extend(
                 [
                     f"### {activity['start_time']}–{activity['end_time']} {activity['name']}",
                     "",
                     activity["description"],
                     "",
-                    f"- 停留：{activity['duration_minutes']} 分钟 · 单人费用：{_money(activity['cost_per_person'])} · {'室内' if activity['indoor'] else '室外'}",
+                    f"- 停留：{activity['duration_minutes']} 分钟 · 单人费用：{_money(activity['cost_per_person'])} · {_event_type(activity)}",
                     f"- 坐标：{activity['lat']}, {activity['lon']}",
                     f"- 地点来源：{activity.get('source', '目的地资料')}",
                 ]
@@ -71,6 +123,10 @@ def export_markdown(plan):
             if activity.get("source_url"):
                 lines.append(f"- 来源链接：{activity['source_url']}")
             lines.append("")
+        if day.get("meals"):
+            lines.append(
+                f"早餐预算：{_money(day.get('breakfast_cost_per_person', 15))} / 人；餐饮预算仅计入已选餐厅。\n"
+            )
         route = day.get("route", {})
         lines.extend(
             [
@@ -162,7 +218,7 @@ def export_ics(plan, trip_id):
         "END:VTIMEZONE",
     ]
     for day in plan["days"]:
-        for activity in day["activities"]:
+        for activity in _daily_events(day):
             uid = hashlib.sha256(
                 f"{trip_id}:{day['day']}:{activity['id']}".encode()
             ).hexdigest()[:32]
@@ -184,7 +240,8 @@ def export_ics(plan, trip_id):
                     f"DTEND;TZID=Asia/Shanghai:{end}",
                     "SUMMARY:" + _ics_escape(activity["name"]),
                     "DESCRIPTION:" + _ics_escape(description),
-                    "LOCATION:" + _ics_escape(activity["name"]),
+                    "LOCATION:"
+                    + _ics_escape(activity.get("location", activity["name"])),
                     f"GEO:{activity['lat']};{activity['lon']}",
                     "STATUS:CONFIRMED",
                     "END:VEVENT",
@@ -329,7 +386,7 @@ def export_pdf(plan):
         story.append(
             paragraph(f"第 {day['day']} 天 · {day['date']} · {day['title']}", section)
         )
-        for activity in day["activities"]:
+        for activity in _daily_events(day, include_alternatives=True):
             story.append(
                 paragraph(
                     f"{activity['start_time']}–{activity['end_time']}  {activity['name']}",
@@ -339,7 +396,14 @@ def export_pdf(plan):
             story.append(paragraph(activity["description"]))
             story.append(
                 paragraph(
-                    f"停留 {activity['duration_minutes']} 分钟  ·  单人费用 {_money(activity['cost_per_person'])}  ·  {'室内' if activity['indoor'] else '室外'}  ·  {activity.get('source', '')}",
+                    f"停留 {activity['duration_minutes']} 分钟  ·  单人费用 {_money(activity['cost_per_person'])}  ·  {_event_type(activity)}  ·  {activity.get('source', '')}",
+                    small,
+                )
+            )
+        if day.get("meals"):
+            story.append(
+                paragraph(
+                    f"早餐预算 {_money(day.get('breakfast_cost_per_person', 15))} / 人；餐饮预算仅计入已选餐厅。",
                     small,
                 )
             )

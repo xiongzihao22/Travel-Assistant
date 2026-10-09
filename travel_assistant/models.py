@@ -23,6 +23,9 @@ class Preferences(TravelModel):
     transport: Literal["walking", "transit", "driving"] = "transit"
     companion: str = Field(default="朋友", max_length=80)
     notes: str = Field(default="", max_length=3000)
+    cuisine_preferences: list[str] = Field(default_factory=list, max_length=8)
+    dietary_preferences: list[str] = Field(default_factory=list, max_length=8)
+    meal_budget_per_person: float = Field(default=60, ge=10, le=10000)
 
 
 class Source(BaseModel):
@@ -56,6 +59,37 @@ class Route(TravelModel):
     source: str = "地点连线与距离估算"
 
 
+class Restaurant(TravelModel):
+    id: str
+    name: str
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+    address: str = ""
+    cuisines: list[str] = Field(default_factory=list)
+    dietary_tags: list[str] = Field(default_factory=list)
+    cost_per_person: float = Field(ge=0)
+    price_source: str = "餐费估算"
+    rating: float | None = Field(default=None, ge=0, le=5)
+    opening_hours: str = ""
+    recommendation_reason: str = ""
+    detour_minutes: int = Field(default=0, ge=0)
+    source: str = "餐饮地点资料"
+    source_url: str = ""
+
+
+class MealPlan(TravelModel):
+    slot: Literal["lunch", "dinner"]
+    start_time: str
+    end_time: str
+    duration_minutes: int = Field(default=60, ge=15, le=180)
+    restaurant: Restaurant
+    alternatives: list[Restaurant] = Field(default_factory=list, max_length=2)
+    cuisine_preferences: list[str] = Field(default_factory=list)
+    dietary_preferences: list[str] = Field(default_factory=list)
+    budget_per_person: float = Field(default=60, ge=10, le=10000)
+    notes: list[str] = Field(default_factory=list)
+
+
 class DayPlan(BaseModel):
     day: int
     date: date
@@ -64,6 +98,8 @@ class DayPlan(BaseModel):
     route: Route = Field(default_factory=Route)
     estimated_cost: float = 0
     notes: list[str] = Field(default_factory=list)
+    meals: list[MealPlan] = Field(default_factory=list)
+    breakfast_cost_per_person: float = Field(default=15, ge=0)
 
 
 class Budget(TravelModel):
@@ -102,7 +138,7 @@ class Plan(BaseModel):
 class GenerateRequest(BaseModel):
     message: str = Field(default="", max_length=4000)
     preferences: dict = Field(default_factory=dict)
-    explicit_fields: list[str] = Field(default_factory=list, max_length=12)
+    explicit_fields: list[str] = Field(default_factory=list, max_length=16)
 
 
 class ReviseRequest(BaseModel):
@@ -113,6 +149,13 @@ class ReviseRequest(BaseModel):
 
 class RestoreRequest(BaseModel):
     version: int = Field(ge=1)
+    base_version: int = Field(ge=1)
+
+
+class MealSelectionRequest(BaseModel):
+    day: int = Field(ge=1, le=7)
+    slot: Literal["lunch", "dinner"]
+    restaurant_id: str = Field(min_length=1, max_length=180)
     base_version: int = Field(ge=1)
 
 
